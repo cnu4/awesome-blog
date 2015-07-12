@@ -12,3 +12,5 @@ dist
 build
 
 # My config
+index.wsgi
+index.wsgic
