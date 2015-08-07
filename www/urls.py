@@ -54,7 +54,7 @@ def user_interceptor(next):
 	ctx.request.user = user
 	return next()
 
-@interceptor('/manage')
+@interceptor('/manage/')
 def manage_interceptor(next):
 	user = ctx.request.user
 	if user and user.admin:
@@ -67,6 +67,11 @@ def manage_interceptor(next):
 def index():
 	blogs = Blog.find_all()
 	return dict(blogs=blogs, user=ctx.request.user)
+
+@view('test.html')
+@get('/test')
+def test():
+	return dict()
 
 @view('signin.html')
 @get('/signin')
@@ -112,8 +117,8 @@ def register_user():
 		raise APIValueError('name')
 	if not email or not _RE_EMAIL.match(email):
 		raise APIValueError('email')
-	#if not password or not _RE_MD5.match(password):
-	#	raise APIValueError('password')
+	if not password or not _RE_MD5.match(password):
+		raise APIValueError('password')
 	user = User.find_first('where email=?', email)
 	if user:
 		raise APIError('register:failed', 'email', 'Email is already in use')
@@ -129,6 +134,30 @@ def register_user():
 def register():
 	return dict()
 
+@view('manage_blog_edit.html')
+@get('/manage/blogs/create')
+def manage_blog_create():
+	return dict(id=None, action='/api/blogs', redirect='/manage/blogs', user=ctx.request.user)
+
+@api
+@post('/api/blogs')
+def api_create_blog():
+	check_admin()
+	i = ctx.request.input(name='', summary='', content='')
+	name = i.name.strip()
+	summary = i.summary.strip()
+	content = i.content.strip()
+	if not name:
+		raise APIValueError('name', 'name cannot be empty.')
+	if not summary:
+		raise APIValueError('summary', 'summary cannot be empty.')
+	if not content:
+		raise APIValueError('content', 'content cannot be empty')
+	user = ctx.request.user
+	blog = Blog(user_id=user.id, user_name=user.name, name=name, summary=summary, content=content)
+	blog.insert()
+	return blog
+  
 @api
 @get('/api/users')
 def api_get_user():
