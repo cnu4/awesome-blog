@@ -4,8 +4,10 @@ __author__ = 'fang'
 
 import os, re, time, base64, hashlib, logging
 
+import markdown2
+
 from transwarp.web import get, post, view, ctx, interceptor, seeother, notfound
-from apis import api, APIError, APIValueError, APIPermissionError, APIResourceNotFoundError
+from apis import Page, api, APIError, APIValueError, APIPermissionError, APIResourceNotFoundError
 from models import User, Blog, Comment
 from config import configs
 
@@ -65,8 +67,8 @@ def manage_interceptor(next):
 @view('blogs.html')
 @get('/')
 def index():
-	blogs = Blog.find_all()
-	return dict(blogs=blogs, user=ctx.request.user)
+	blogs, page = _get_blogs_by_page()
+	return dict(page=page, blogs=blogs, user=ctx.request.user)
 
 @view('test.html')
 @get('/test')
@@ -94,7 +96,7 @@ def authenticate():
 	if user is None:
 		raise APIError('auth:failed', 'email', 'Invalid email.')
 	elif user.password != password:
-		raise APIError('auth:failed', 'password', 'Invalid password')
+		raise APIError('auth:failed', 'password', 'Incorrect password')
 	# make session cookie
 	max_age = 604800 if remember == 'true' else None
 	cookie = make_signed_cookie(user.id, user.password, max_age)
@@ -122,7 +124,7 @@ def register_user():
 	user = User.find_first('where email=?', email)
 	if user:
 		raise APIError('register:failed', 'email', 'Email is already in use')
-	user = User(name=name, email=email, password=password, image='http://www.gravatar.com/avatar/%s?d=mm&s=120' % hashlib.md5(email).hexdigest())
+	user = User(name=name, email=email, password=password, image='https://en.gravatar.com/avatar/%s?d=mm&s=120' % hashlib.md5(email).hexdigest())
 	user.insert()
 	# make session cookie:
 	cookie = make_signed_cookie(user.id, user.password, None)
@@ -134,10 +136,48 @@ def register_user():
 def register():
 	return dict()
 
+@get('/manage/')
+def manage_index():
+	raise seeother('/manage/comments')
+
 @view('manage_blog_edit.html')
 @get('/manage/blogs/create')
 def manage_blog_create():
 	return dict(id=None, action='/api/blogs', redirect='/manage/blogs', user=ctx.request.user)
+
+@view('manage_blog_list.html')
+@get('/manage/blogs')
+def manage_blogs():
+	return dict(page_index=_get_page_index(), user=ctx.request.user)
+
+@view('blog.html')
+@get('/blog/:blog_id')
+def blog(blog_id):
+	blog = Blog.get(blog_id)
+	if blog is None:
+		raise notfound()
+	blog.html_content = markdown2.markdown(blog.content)
+	comments = Comment.find_by('where blog_id=? order by created_at desc limit 1000', blog_id)
+	return dict(blog=blog, comments=comments, user=ctx.request.user)
+
+@view('manage_blog_edit.html')
+@get('/manage/blogs/edit/:blog_id')
+def manage_blogs_edit(blog_id):
+	blog = Blog.get(blog_id)
+	if blog is None:
+		raise notfound()
+	return dict(id=blog.id, name=blog.name, summary=blog.summary, content=blog.content, action='/api/blogs/%s' % blog_id, redirect='/manage/blogs', user=ctx.request.user)
+
+@view('manage_comment_list.html')
+@get('/manage/comments')
+def manage_comments():
+	return dict(page_index=_get_page_index(), user=ctx.request.user)
+
+@view('manage_user_list.html')
+@get('/manage/users')
+def manage_users():
+	return dict(page_index=_get_page_index(), user=ctx.request.user)
+
 
 @api
 @post('/api/blogs')
@@ -157,11 +197,113 @@ def api_create_blog():
 	blog = Blog(user_id=user.id, user_name=user.name, name=name, summary=summary, content=content)
 	blog.insert()
 	return blog
-  
+
+@api
+@get('/api/blogs')
+def api_get_blogs():
+	format = ctx.request.get('format', '')
+	blogs, page = _get_blogs_by_page()
+	if format == 'html':
+		for blog in blogs:
+			blog.content = markdown2.markdown(blog.content)
+	return dict(blogs=blogs, page=page)
+
+@api
+@get('/api/blogs/:blog_id')
+def api_get_blog(blog_id):
+	blog = Blog.get(blog_id)
+	if blog:
+		return blog
+	raise APIResourceNotFoundError('Blog')
+
+@api
+@post('/api/blogs/:blog_id')
+def api_update_blog(blog_id):
+	check_admin()
+	i = ctx.request.input(name='', summary='', content='')
+	name = i.name.strip()
+	summary = i.summary.strip()
+	content = i.content.strip()
+	if not name:
+		raise APIValueError('name', 'name cannot be empty.')
+	if not summary:
+		raise APIValueError('summary', 'summary cannot be empty.')
+	if not content:
+		raise APIValueError('content', 'content cannot be empty')
+	blog = Blog.get(blog_id)
+	if blog is None:
+		raise APIResourceNotFoundError('Blog')
+	blog.name = name
+	blog.summary = summary
+	blog.content = content
+	blog.update()
+	return blog
+
+@api
+@post('/api/blogs/:blog_id/delete')
+def api_delete_blog(blog_id):
+	check_admin()
+	blog = Blog.get(blog_id)
+	blog = Blog.get(blog_id)
+	if blog is None:
+		raise APIResourceNotFoundError('Blog')
+	blog.delete()
+	return dict(id=blog_id)
+
+@api
+@post('/api/blogs/:blog_id/comments')
+def api_create_blog_comment(blog_id):
+	user = ctx.request.user
+	if user is None:
+		raise APIPermissionError('Need signin.')
+	blog = Blog.get(blog_id)
+	if blog is None:
+		raise APIResourceNotFoundError('Blog')
+	content = ctx.request.input(content='').content.strip()
+	if not content:
+		raise APIValueError('content')
+	c = Comment(blog_id=blog_id, user_id=user.id, user_name=user.name, user_image=user.image, content=content)
+	c.insert()
+	return dict(comment=c)
+
+@api
+@post('/api/comments/:comment_id/delete')
+def api_delete_comment(comment_id):
+	check_admin()
+	comment = Comment.get(comment_id)
+	if comment is None:
+		raise APIResourceNotFoundError('Comment')
+	comment.delete()
+	return dict(id=comment_id)
+
+@api
+@get('/api/comments')
+def api_get_comments():
+	total = Comment.count_all()
+	page = Page(total, _get_page_index())
+	comments = Comment.find_by('order by created_at desc limit ?,?', page.offset, page.limit)
+	return dict(comments=comments, page=page)
+
+def _get_page_index():
+	page_index = 1
+	try:
+		page_index = int(ctx.request.get('page', '1'))
+	except ValueError:
+		pass
+	return page_index
+
+def _get_blogs_by_page():
+	total = Blog.count_all()
+	page = Page(total, _get_page_index())
+	blogs = Blog.find_by('order by created_at desc limit ?,?', page.offset, page.limit)
+	return blogs, page
+
 @api
 @get('/api/users')
 def api_get_user():
-	users = User.find_by('order by created_at desc')
+	total = User.count_all()
+	page = Page(total, _get_page_index())
+	users = User.find_by('order by created_at desc limit ?,?', page.offset, page.limit)
 	for u in users:
 		u.password = '******'
-	return dict(users=users)
+	return dict(users=users,page=page)
